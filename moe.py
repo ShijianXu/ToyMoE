@@ -278,3 +278,21 @@ class ToyMoE(nn.Module):
         # output = (expert_outputs * gate_probs).sum(dim=1)  # Shape: (batch_size, out_channels, height, width)
 
         # return output
+
+
+class SimpleConvNet(nn.Module):
+    def __init__(self, in_channels, output_dim):
+        super(SimpleConvNet, self).__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, 128, kernel_size=3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(128, 256, kernel_size=3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(256, 256, kernel_size=3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(256, 512, kernel_size=3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(512, 512, kernel_size=3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Flatten(),
+            nn.Linear(512, 128), nn.ReLU(),
+            nn.Linear(128, output_dim)
+        )
+
+    def forward(self, x):
+        return self.net(x)
