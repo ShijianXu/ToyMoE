@@ -149,17 +149,9 @@ class ToyMoE(nn.Module):
         self.extractor = ConvNet(in_channels)
 
         # instantiate experts
-        self.experts = nn.ModuleList(
-            [
-                MLP(
-                    input_size=self.input_size,
-                    output_size=self.output_size,
-                    hidden_size=self.hidden_size
-                ) for i in range(self.num_experts)
-            ]
-        )
-        self.w_gate = nn.Parameter(torch.zeros(self.input_size, self.num_experts), requires_grad=True)
-        self.w_noise = nn.Parameter(torch.zeros(self.input_size, self.num_experts), requires_grad=True)
+        self.experts = nn.ModuleList([MLP(self.input_size, self.output_size, self.hidden_size) for i in range(self.num_experts)])
+        self.w_gate = nn.Parameter(torch.zeros(input_size, num_experts), requires_grad=True)
+        self.w_noise = nn.Parameter(torch.zeros(input_size, num_experts), requires_grad=True)
 
         self.softplus = nn.Softplus()
         self.softmax = nn.Softmax(1)
@@ -183,6 +175,16 @@ class ToyMoE(nn.Module):
         if x.shape[0] == 1:
             return torch.tensor([0], device=x.device, dtype=x.dtype)
         return x.float().var() / (x.float().mean()**2 + eps)
+
+    def _gates_to_load(self, gates):
+        """Compute the true load per expert, given the gates.
+        The load is the number of examples for which the corresponding gate is >0.
+        Args:
+        gates: a `Tensor` of shape [batch_size, n]
+        Returns:
+        a float32 `Tensor` of shape [n]
+        """
+        return (gates > 0).sum(0)
 
     def _prob_in_top_k(self, clean_values, noisy_values, noise_stddev, noisy_top_values):
         """Helper function to NoisyTopKGating.
@@ -217,21 +219,27 @@ class ToyMoE(nn.Module):
         prob = torch.where(is_in, prob_if_in, prob_if_out)
         return prob
 
-    def _gates_to_load(self, gates):
-        return (gates > 0).sum(0)       # 沿 batch 维度求和，得到每个 expert 的负载 （被选择的次数）
-
     def noisy_top_k_gating(self, x, train, noise_epsilon=1e-2):
-        # only add noise at training time
-        clean_logits = x @ self.w_gate  # B x num_experts
+        """Noisy top-k gating.
+          See paper: https://arxiv.org/abs/1701.06538.
+          Args:
+            x: input Tensor with shape [batch_size, input_size]
+            train: a boolean - we only add noise at training time.
+            noise_epsilon: a float
+          Returns:
+            gates: a Tensor with shape [batch_size, num_experts]
+            load: a Tensor with shape [num_experts]
+        """
+        clean_logits = x @ self.w_gate
         if self.noisy_gating and train:
-            raw_noise_stddev = x @ self.w_noise  # B x num_experts
-            noise_stddev = self.softplus(raw_noise_stddev) + noise_epsilon
-            noise = torch.randn_like(clean_logits) * noise_stddev
-            noisy_logits = clean_logits + noise
+            raw_noise_stddev = x @ self.w_noise
+            noise_stddev = ((self.softplus(raw_noise_stddev) + noise_epsilon))
+            noisy_logits = clean_logits + (torch.randn_like(clean_logits) * noise_stddev)
             logits = noisy_logits
         else:
             logits = clean_logits
 
+        # calculate topk + 1 that will be needed for the noisy gates
         logits = self.softmax(logits)
         top_logits, top_indices = logits.topk(min(self.k + 1, self.num_experts), dim=1)
         top_k_logits = top_logits[:, :self.k]
@@ -251,13 +259,11 @@ class ToyMoE(nn.Module):
         # feature extraction
         x = self.extractor(x)       # B x 512
         gates, load = self.noisy_top_k_gating(x, self.training)
-
-        importance = gates.sum(0)       # 每个 expert 的重要性
-
+        # calculate importance loss
+        importance = gates.sum(0)
         loss = self.cv_squared(importance) + self.cv_squared(load)
-        loss = loss * loss_coef
+        loss *= loss_coef
 
-        # dispatch to experts and combine results
         dispatcher = SparseDispatcher(self.num_experts, gates)
         expert_inputs = dispatcher.dispatch(x)
         gates = dispatcher.expert_to_gates()
