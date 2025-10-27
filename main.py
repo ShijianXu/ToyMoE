@@ -8,9 +8,13 @@ from torch.utils.data import random_split, DataLoader
 import trackio
 import argparse
 
+from zmq import device
+
 from moe import ToyMoE, SimpleConvNet
 
-def train(model, train_loader, val_loader, criterion, optimizer, device, epochs):
+def train(model, train_loader, val_loader, criterion, optimizer, device, epochs, save_path="best_model.pth"):
+    best_val_acc = 0.0
+
     for epoch in range(epochs):
         # in case validation changes the state
         model.train()
@@ -44,8 +48,30 @@ def train(model, train_loader, val_loader, criterion, optimizer, device, epochs)
                 print(f"[{epoch + 1}, {i + 1}] loss: {running_loss / 100:.5f}    aux_loss: {aux_loss.item():.5f}    total_loss: {total_loss.item():.5f}")
                 running_loss = 0.0
 
-        if (epoch + 1) % 10 == 0:
-            eval(model, val_loader, device, test=False)
+        # if (epoch + 1) % 10 == 0:
+        #     eval(model, val_loader, device, test=False)
+
+        # validate after each epoch
+        val_acc = eval(model, val_loader, device, test=False)
+
+        # Track the best validation accuracy and save checkpoint
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            torch.save({
+                "epoch": epoch + 1,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "val_accuracy": val_acc,
+            }, save_path)
+            print(f"✅ Saved new best model (epoch {epoch + 1}, val acc {val_acc:.2f}%)")
+
+        trackio.log({
+            "epoch": epoch + 1,
+            "val_accuracy": val_acc,
+            "best_val_accuracy": best_val_acc,
+        })
+
+    print(f"\nTraining done. Best val accuracy: {best_val_acc:.2f}%")
 
 
 def eval(model, test_loader, device, test=True):
@@ -61,12 +87,14 @@ def eval(model, test_loader, device, test=True):
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
 
+    acc = 100 * correct / total
     if test:
-        print(f"Accuracy: {100 * correct / total:.2f}%")
-        trackio.log({"test_accuracy": 100 * correct / total})
+        print(f"Test Accuracy: {acc:.2f}%")
+        trackio.log({"test_accuracy": acc})
     else:
-        print(f"Validation Accuracy: {100 * correct / total:.2f}%")
-        trackio.log({"val_accuracy": 100 * correct / total})
+        print(f"Validation Accuracy: {acc:.2f}%")
+        trackio.log({"val_accuracy": acc})
+    return acc
 
 
 def main(args):
@@ -127,9 +155,13 @@ def main(args):
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
 
-    train(model, train_loader, val_loader, criterion, optimizer, device, args.epochs)
+    train(model, train_loader, val_loader, criterion, optimizer, device, args.epochs, args.save_dir + "/best_model.pth")
 
-    print('Finished Training')
+    print("Finished Training. Loading best checkpoint...")
+    checkpoint = torch.load(args.save_dir + "/best_model.pth", map_location=device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    print(f"Loaded best model from epoch {checkpoint['epoch']} with val acc {checkpoint['val_accuracy']:.2f}%")
+
     eval(model, test_loader, device)
 
     trackio.finish()
@@ -138,10 +170,11 @@ def main(args):
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser()
     argparser.add_argument("--batch_size", type=int, default=128)
-    argparser.add_argument("--epochs", type=int, default=50)
+    argparser.add_argument("--epochs", type=int, default=20)
     argparser.add_argument("--learning_rate", type=float, default=0.001)
     argparser.add_argument("--num_experts", type=int, default=10)
     argparser.add_argument("--k", type=int, default=1)
+    argparser.add_argument("--save_dir", type=str, default="./ckpts")
     args = argparser.parse_args()
 
     main(args)
