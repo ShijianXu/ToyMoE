@@ -7,6 +7,7 @@ from torch.utils.data import random_split, DataLoader
 
 import trackio
 import argparse
+import time
 
 from zmq import device
 
@@ -47,9 +48,6 @@ def train(model, train_loader, val_loader, criterion, optimizer, device, epochs,
             if i % 100 == 99:    # print every 2000 mini-batches
                 print(f"[{epoch + 1}, {i + 1}] loss: {running_loss / 100:.5f}    aux_loss: {aux_loss.item():.5f}    total_loss: {total_loss.item():.5f}")
                 running_loss = 0.0
-
-        # if (epoch + 1) % 10 == 0:
-        #     eval(model, val_loader, device, test=False)
 
         # validate after each epoch
         val_acc = eval(model, val_loader, device, test=False)
@@ -100,7 +98,7 @@ def eval(model, test_loader, device, test=True):
 def main(args):
     trackio.init(
         project="MoE-Toy-Example",
-        name="ConvMoE-CIFAR10",
+        name=f"ConvMoE-CIFAR10-{time.strftime('%Y%m%d-%H%M%S')}",
         config=vars(args)
     )
 
@@ -170,7 +168,7 @@ def main(args):
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser()
     argparser.add_argument("--batch_size", type=int, default=128)
-    argparser.add_argument("--epochs", type=int, default=20)
+    argparser.add_argument("--epochs", type=int, default=30)
     argparser.add_argument("--learning_rate", type=float, default=0.001)
     argparser.add_argument("--num_experts", type=int, default=10)
     argparser.add_argument("--k", type=int, default=1)
@@ -178,5 +176,3 @@ if __name__ == "__main__":
     args = argparser.parse_args()
 
     main(args)
-
-    

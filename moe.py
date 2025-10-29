@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.distributions.normal import Normal
-
+import torch.nn.functional as F
 
 class SparseDispatcher(object):
     """Helper for implementing a mixture of experts.
@@ -152,6 +152,8 @@ class ToyMoE(nn.Module):
         self.experts = nn.ModuleList([MLP(self.input_size, self.output_size, self.hidden_size) for i in range(self.num_experts)])
         self.w_gate = nn.Parameter(torch.zeros(input_size, num_experts), requires_grad=True)
         self.w_noise = nn.Parameter(torch.zeros(input_size, num_experts), requires_grad=True)
+        nn.init.xavier_uniform_(self.w_gate)
+        nn.init.xavier_uniform_(self.w_noise)
 
         self.softplus = nn.Softplus()
         self.softmax = nn.Softmax(1)
@@ -219,32 +221,33 @@ class ToyMoE(nn.Module):
         prob = torch.where(is_in, prob_if_in, prob_if_out)
         return prob
 
-    def noisy_top_k_gating(self, x, train, noise_epsilon=1e-2):
+    def noisy_top_k_gating(self, x, train):
         """Noisy top-k gating.
           See paper: https://arxiv.org/abs/1701.06538.
           Args:
             x: input Tensor with shape [batch_size, input_size]
             train: a boolean - we only add noise at training time.
-            noise_epsilon: a float
           Returns:
             gates: a Tensor with shape [batch_size, num_experts]
             load: a Tensor with shape [num_experts]
         """
-        clean_logits = x @ self.w_gate
+        clean_logits = x @ self.w_gate                      # batch_size x num_experts
         if self.noisy_gating and train:
             raw_noise_stddev = x @ self.w_noise
-            noise_stddev = ((self.softplus(raw_noise_stddev) + noise_epsilon))
-            noisy_logits = clean_logits + (torch.randn_like(clean_logits) * noise_stddev)
+            noise_stddev = self.softplus(raw_noise_stddev)
+            noise = torch.randn_like(clean_logits) * noise_stddev
+            noisy_logits = clean_logits + noise
             logits = noisy_logits
         else:
             logits = clean_logits
 
         # calculate topk + 1 that will be needed for the noisy gates
-        logits = self.softmax(logits)
-        top_logits, top_indices = logits.topk(min(self.k + 1, self.num_experts), dim=1)
+        top_logits, top_indices = logits.topk(min(self.k + 1, self.num_experts), dim=-1)
         top_k_logits = top_logits[:, :self.k]
         top_k_indices = top_indices[:, :self.k]
-        top_k_gates = top_k_logits / (top_k_logits.sum(1, keepdim=True) + 1e-6)  # normalization
+        logits = self.softmax(logits)
+        
+        top_k_gates = F.softmax(top_k_logits, dim=1)
 
         zeros = torch.zeros_like(logits, requires_grad=True)
         gates = zeros.scatter(1, top_k_indices, top_k_gates)
@@ -270,20 +273,6 @@ class ToyMoE(nn.Module):
         expert_outputs = [self.experts[i](expert_inputs[i]) for i in range(self.num_experts)]
         y = dispatcher.combine(expert_outputs)
         return y, loss
-
-        # # soft gating
-        # batch_size, channels, height, width = x.size()
-        # x_flat = x.view(batch_size, channels, -1).mean(dim=2)  # Global average pooling
-        # gate_scores = self.gate(x_flat)  # Shape: (batch_size, num_experts)
-        # gate_probs = torch.softmax(gate_scores, dim=1)  # Shape: (batch_size, num_experts)
-
-        # expert_outputs = torch.stack([expert(x) for expert in self.experts], dim=1)  # Shape: (batch_size, num_experts, out_channels, height, width)
-        
-        # # Weighted sum of expert outputs
-        # gate_probs = gate_probs.unsqueeze(2).unsqueeze(3).unsqueeze(4)  # Shape: (batch_size, num_experts, 1, 1, 1)
-        # output = (expert_outputs * gate_probs).sum(dim=1)  # Shape: (batch_size, out_channels, height, width)
-
-        # return output
 
 
 class SimpleConvNet(nn.Module):
